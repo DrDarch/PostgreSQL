@@ -1,0 +1,75 @@
+properties([
+        parameters([
+                string(name: 'DBHOST', defaultValue: '', description: 'Database host.'),
+                string(name: 'DATABASE', defaultValue: '', description: 'Database.'),
+                string(name: 'PASSWORD', defaultValue: '', description: 'Admin password.'),
+        ]),
+])
+podTemplate(yaml: """
+kind: Pod
+spec:
+  imagePullSecrets:
+    - name: devsec
+  containers:
+    - name: dba-psql-container
+      imagePullPolicy: Always
+      image: repository/build:dba-psql-latest
+      command:
+        - cat
+      tty: true
+""") {
+    node(POD_LABEL) {
+        checkout(scm)
+        println("Connecting to ${env.DBHOST} ${env.DATABASE}")
+        container('db-psql-container') {
+            // ---------------
+            stage("Conn_Test") {
+                def int status = sh(
+                        returnStatus: true,
+                        script: '''
+set +x;
+export PGPASSWORD=$PASSWORD
+psql -U admin -p 5432 -d postgres -h $DBHOST -c 'SELECT * FROM pg_stat_activity'
+''')
+                // Exit pipeline if fail
+                ErrorHandler(status)
+            }
+            // ------------------
+            stage("Gen_Sql_File") {
+                println("Generating sql file")
+                dir("$WORKSPACE/dba_dir") {
+                    sh('''#!/bin/bash
+set +x;
+touch commands.sql
+ls ${WORKSPACE}
+''')
+                    sh(""" #!/usr/bin/env bash
+set +x;
+cat << 'EOF' > commands.sql
+create schema if not exists ${NEWSCHEMA};
+EOF
+             """)
+                }
+            }
+            // ----------------------
+            stage("Sql_Execution") {
+                // Script execution confirmation
+                input("Please confirm execution of this script on database?")
+                dir("$WORKSPACE/dba_dir") {
+                    sh('''#!/bin/bash
+set +x;
+export PGPASSWORD=$PASSWORD
+psql -U admin -p 5432 -d postgres -h $DBHOST -f commands.sql
+''')
+                }
+            }
+        }
+    }
+}
+
+def ErrorHandler(int status) {
+    if (status > 0) {
+        println("Returned code grater than zero")
+        sh("exit 1")
+    }
+}
